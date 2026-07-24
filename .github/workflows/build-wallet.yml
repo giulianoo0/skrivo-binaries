@@ -55,9 +55,9 @@ jobs:
           mkdir -p dist
           cp apps/agent/target/release/skrivo-wallet dist/
           cd dist
-          tar -czf "skrivo-wallet-${TAG}-linux-x86_64.tar.gz" skrivo-wallet
+          tar -czf "skrivo-wallet-linux-x86_64.tar.gz" skrivo-wallet
           rm skrivo-wallet
-          sha256sum ./*.tar.gz > "skrivo-wallet-${TAG}-linux-x86_64.sha256"
+          sha256sum ./*.tar.gz > "skrivo-wallet-linux-x86_64.sha256"
 
       - name: Publicar release (somente binários)
         env:
