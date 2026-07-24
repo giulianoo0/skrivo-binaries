@@ -1,0 +1,77 @@
+name: Build Skrivo Wallet
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch ou tag do repositório fonte"
+        required: false
+        default: "main"
+  repository_dispatch:
+    types: [build-wallet]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout do fonte (privado, apenas no runner)
+        uses: actions/checkout@v4
+        with:
+          repository: giulianoo0/nasa
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+
+      - name: Dependências de sistema (GPUI)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake clang \
+            libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcb1-dev libxcb-xkb-dev \
+            libvulkan-dev libasound2-dev
+
+      - name: Toolchain Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/agent
+
+      - name: Compilar (release)
+        run: cargo build --release --manifest-path apps/agent/Cargo.toml
+
+      - name: Empacotar binário
+        id: package
+        run: |
+          VERSION="$(grep -m1 '^version' apps/agent/Cargo.toml | cut -d'"' -f2)"
+          TAG="v${VERSION}-${GITHUB_RUN_NUMBER}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          cp apps/agent/target/release/skrivo-wallet dist/
+          cd dist
+          tar -czf "skrivo-wallet-${TAG}-linux-x86_64.tar.gz" skrivo-wallet
+          rm skrivo-wallet
+          sha256sum ./*.tar.gz > "skrivo-wallet-${TAG}-linux-x86_64.sha256"
+
+      - name: Publicar release (somente binários)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.package.outputs.tag }}"
+          SOURCE_REF="${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}"
+          gh release create "$TAG" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "Skrivo Wallet ${TAG}" \
+            --latest \
+            --notes "Build automatizado do Skrivo Wallet (ref \`${SOURCE_REF}\` do repositório fonte privado). Contém apenas binários — sem código fonte. Plataforma: Linux x86_64."
+
+  # Windows e macOS ficam desativados até o app ganhar suporte de tray/autostart
+  # nessas plataformas (hoje o tray usa ksni, que é Linux-only). Quando chegar a
+  # hora: duplicar o job com runs-on: windows-latest / macos-latest e ajustar o
+  # empacotamento (.zip / .dmg).
