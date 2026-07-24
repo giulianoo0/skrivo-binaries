@@ -64,12 +64,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.package.outputs.tag }}"
-          SOURCE_REF="${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}"
           gh release create "$TAG" dist/* \
             --repo "${{ github.repository }}" \
             --title "Skrivo Wallet ${TAG}" \
             --latest \
-            --notes "Build automatizado do Skrivo Wallet (ref \`${SOURCE_REF}\` do repositório fonte privado). Contém apenas binários — sem código fonte. Plataforma: Linux x86_64."
+            --notes "$(printf 'Build automatizado do Skrivo Wallet\n\nPlataformas:\n- Linux x86_64')"
 
   # Windows e macOS ficam desativados até o app ganhar suporte de tray/autostart
   # nessas plataformas (hoje o tray usa ksni, que é Linux-only). Quando chegar a
