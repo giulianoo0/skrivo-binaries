@@ -51,6 +51,8 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             # Precisa bater com `std::env::consts::OS`-`ARCH` (ver updater.rs).
+            # A extensão do artefato também faz parte do contrato do updater
+            # (`asset_suffix`): tar.gz no Linux, .exe no Windows, .dmg no macOS.
             asset: linux-x86_64
             bin: skrivo-wallet
           - name: Windows x86_64
@@ -124,25 +126,128 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: cargo build --release --target ${{ matrix.target }} --manifest-path apps/agent/Cargo.toml
 
-      # Formato exigido pelo updater: `<algo>-<os>-<arch>.tar.gz` contendo o
-      # binário na raiz, mais um `.sha256` cujo nome é o do tarball + ".sha256"
-      # (updater.rs: `format!("{}.sha256", asset.name)`).
-      - name: Empacotar binário
+      # Todo artefato vem acompanhado de um `.sha256` cujo nome é o do arquivo
+      # + ".sha256" (updater.rs: `format!("{}.sha256", asset.name)`), no
+      # formato de saída do `sha256sum`.
+
+      # Linux: tarball com o binário na raiz.
+      - name: Empacotar (Linux tar.gz)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          ASSET="skrivo-wallet-${{ needs.version.outputs.tag }}-${{ matrix.asset }}"
+          ASSET="skrivo-wallet-${{ needs.version.outputs.tag }}-${{ matrix.asset }}.tar.gz"
           mkdir -p dist stage
           cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" "stage/${{ matrix.bin }}"
-          tar -czf "dist/${ASSET}.tar.gz" -C stage "${{ matrix.bin }}"
+          tar -czf "dist/${ASSET}" -C stage "${{ matrix.bin }}"
+          cd dist
+          sha256sum "${ASSET}" > "${ASSET}.sha256"
+          cat "${ASSET}.sha256"
+
+      # Windows: o .exe vai cru para a release — quem baixa executa direto, e o
+      # updater grava os bytes baixados por cima do executável atual.
+      - name: Empacotar (Windows .exe)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET="skrivo-wallet-${{ needs.version.outputs.tag }}-${{ matrix.asset }}.exe"
+          mkdir -p dist
+          cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${ASSET}"
+          cd dist
+          # O bash do runner do Windows (Git for Windows) traz sha256sum, mas o
+          # fallback mantém o passo válido em qualquer imagem.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ASSET}" > "${ASSET}.sha256"
+          else
+            shasum -a 256 "${ASSET}" > "${ASSET}.sha256"
+          fi
+          cat "${ASSET}.sha256"
+
+      # macOS: bundle .app dentro de um .dmg com atalho para /Applications —
+      # arrastar e soltar, como qualquer aplicativo do sistema. O updater monta
+      # o .dmg e troca o `Skrivo Wallet.app` inteiro (a assinatura ad-hoc abaixo
+      # sela o Info.plist e o _CodeSignature deste build, então trocar só o
+      # executável quebraria o selo): o bundle precisa estar na raiz do .dmg
+      # com exatamente esse nome.
+      - name: Empacotar (macOS .dmg)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.version.outputs.tag }}"
+          ASSET="skrivo-wallet-${TAG}-${{ matrix.asset }}.dmg"
+          # "v0.1.0-7" -> CFBundleShortVersionString 0.1.0, CFBundleVersion 7.
+          VERSION="${TAG#v}"
+          SHORT_VERSION="${VERSION%-*}"
+          BUILD_VERSION="${VERSION##*-}"
+
+          # O bundle é montado direto na raiz do .dmg: copiar um .app já
+          # assinado é o tipo de passo que estraga o selo sem avisar.
+          APP="dmgroot/Skrivo Wallet.app"
+          mkdir -p dist stage "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+          cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" \
+            "${APP}/Contents/MacOS/skrivo-wallet"
+          chmod +x "${APP}/Contents/MacOS/skrivo-wallet"
+
+          # .icns gerado a partir do PNG 1024 do repositório; sips e iconutil
+          # já vêm no runner (não há inkscape/imagemagick garantidos).
+          ICONSET="stage/skrivo.iconset"
+          mkdir -p "$ICONSET"
+          for SIZE in 16 32 128 256 512; do
+            sips -z "$SIZE" "$SIZE" logos/skrivo-icon-1024.png \
+              --out "${ICONSET}/icon_${SIZE}x${SIZE}.png" >/dev/null
+            sips -z "$((SIZE * 2))" "$((SIZE * 2))" logos/skrivo-icon-1024.png \
+              --out "${ICONSET}/icon_${SIZE}x${SIZE}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "${APP}/Contents/Resources/skrivo.icns"
+
+          cat > "${APP}/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>app.skrivo.wallet</string>
+            <key>CFBundleName</key>
+            <string>Skrivo Wallet</string>
+            <key>CFBundleDisplayName</key>
+            <string>Skrivo Wallet</string>
+            <key>CFBundleExecutable</key>
+            <string>skrivo-wallet</string>
+            <key>CFBundleIconFile</key>
+            <string>skrivo</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${SHORT_VERSION}</string>
+            <key>CFBundleVersion</key>
+            <string>${BUILD_VERSION}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # Sem assinatura (ainda que ad-hoc) o macOS arm64 mata o processo com
+          # "code signature invalid" logo no lançamento.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "Skrivo Wallet" -srcfolder dmgroot -ov \
+            -format UDZO "dist/${ASSET}"
+
           cd dist
           # macOS não tem sha256sum; o formato de saída do shasum é o mesmo.
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${ASSET}.tar.gz" > "${ASSET}.tar.gz.sha256"
+            sha256sum "${ASSET}" > "${ASSET}.sha256"
           else
-            shasum -a 256 "${ASSET}.tar.gz" > "${ASSET}.tar.gz.sha256"
+            shasum -a 256 "${ASSET}" > "${ASSET}.sha256"
           fi
-          cat "${ASSET}.tar.gz.sha256"
+          cat "${ASSET}.sha256"
 
       - name: Guardar artefato
         uses: actions/upload-artifact@v4
@@ -177,4 +282,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "Skrivo Wallet ${TAG}" \
             --latest \
-            --notes "$(printf 'Build automatizado do Skrivo Wallet\n\nPlataformas:\n- Linux x86_64\n- Windows x86_64\n- macOS aarch64 (Apple Silicon)\n- macOS x86_64 (Intel)')"
+            --notes "$(printf 'Build automatizado do Skrivo Wallet\n\nPlataformas:\n- Windows x86_64 — `.exe`, é só executar\n- macOS aarch64 (Apple Silicon) — `.dmg`, arraste para Aplicativos\n- macOS x86_64 (Intel) — `.dmg`, arraste para Aplicativos\n- Linux x86_64 — `.tar.gz` com o binário\n\nCada arquivo vem com um `.sha256` para conferência.')"
