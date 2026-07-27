@@ -13,19 +13,71 @@ on:
 permissions:
   contents: write
 
+env:
+  SOURCE_REF: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+
 jobs:
-  build-linux-x86_64:
-    name: Linux x86_64
+  # A tag é a mesma para todas as plataformas do mesmo run; calculada uma vez
+  # para que os nomes dos artefatos não divirjam entre os jobs da matriz.
+  version:
+    name: Versão
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Checkout do fonte (privado, apenas no runner)
         uses: actions/checkout@v4
         with:
           repository: giulianoo0/nasa
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
-          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Calcular tag
+        id: tag
+        run: |
+          VERSION="$(grep -m1 '^version' apps/agent/Cargo.toml | cut -d'"' -f2)"
+          echo "tag=v${VERSION}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Sem fail-fast: um alvo quebrado não deve esconder o resultado dos outros.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            # Precisa bater com `std::env::consts::OS`-`ARCH` (ver updater.rs).
+            asset: linux-x86_64
+            bin: skrivo-wallet
+          - name: Windows x86_64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: windows-x86_64
+            bin: skrivo-wallet.exe
+          - name: macOS aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            asset: macos-aarch64
+            bin: skrivo-wallet
+          - name: macOS x86_64
+            runner: macos-14
+            target: x86_64-apple-darwin
+            asset: macos-x86_64
+            bin: skrivo-wallet
+    steps:
+      - name: Checkout do fonte (privado, apenas no runner)
+        uses: actions/checkout@v4
+        with:
+          repository: giulianoo0/nasa
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Dependências de sistema (GPUI)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -37,40 +89,92 @@ jobs:
 
       - name: Toolchain Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache de build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/agent
+          key: ${{ matrix.target }}
+
+      # O build.rs do gpui compila os shaders HLSL com fxc.exe em release. O
+      # fxc não está no PATH dos runners e o fallback do gpui aponta para uma
+      # versão fixa do Windows SDK, então localizamos o binário e passamos o
+      # caminho explicitamente via GPUI_FXC_PATH.
+      - name: Localizar fxc.exe (Windows SDK)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
+              -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe não encontrado no Windows SDK" }
+          Write-Host "fxc.exe: $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
 
       - name: Compilar (release)
-        run: cargo build --release --manifest-path apps/agent/Cargo.toml
+        shell: bash
+        env:
+          # Assado no binário por `option_env!` (ver updater::current_run_number).
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          # Piso de compatibilidade do macOS; 11.0 é o mínimo para arm64.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path apps/agent/Cargo.toml
 
+      # Formato exigido pelo updater: `<algo>-<os>-<arch>.tar.gz` contendo o
+      # binário na raiz, mais um `.sha256` cujo nome é o do tarball + ".sha256"
+      # (updater.rs: `format!("{}.sha256", asset.name)`).
       - name: Empacotar binário
-        id: package
+        shell: bash
         run: |
-          VERSION="$(grep -m1 '^version' apps/agent/Cargo.toml | cut -d'"' -f2)"
-          TAG="v${VERSION}-${GITHUB_RUN_NUMBER}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          mkdir -p dist
-          cp apps/agent/target/release/skrivo-wallet dist/
+          set -euo pipefail
+          ASSET="skrivo-wallet-${{ needs.version.outputs.tag }}-${{ matrix.asset }}"
+          mkdir -p dist stage
+          cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" "stage/${{ matrix.bin }}"
+          tar -czf "dist/${ASSET}.tar.gz" -C stage "${{ matrix.bin }}"
           cd dist
-          tar -czf "skrivo-wallet-linux-x86_64.tar.gz" skrivo-wallet
-          rm skrivo-wallet
-          sha256sum ./*.tar.gz > "skrivo-wallet-linux-x86_64.sha256"
+          # macOS não tem sha256sum; o formato de saída do shasum é o mesmo.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ASSET}.tar.gz" > "${ASSET}.tar.gz.sha256"
+          else
+            shasum -a 256 "${ASSET}.tar.gz" > "${ASSET}.tar.gz.sha256"
+          fi
+          cat "${ASSET}.tar.gz.sha256"
+
+      - name: Guardar artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: skrivo-wallet-${{ matrix.asset }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  # Release única com os artefatos de todas as plataformas. Publicar a partir
+  # dos jobs da matriz criaria corrida na criação da tag.
+  release:
+    name: Publicar release
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Baixar artefatos
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: skrivo-wallet-*
+          merge-multiple: true
 
       - name: Publicar release (somente binários)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ steps.package.outputs.tag }}"
+          set -euo pipefail
+          TAG="${{ needs.version.outputs.tag }}"
+          ls -la dist
           gh release create "$TAG" dist/* \
             --repo "${{ github.repository }}" \
             --title "Skrivo Wallet ${TAG}" \
             --latest \
-            --notes "$(printf 'Build automatizado do Skrivo Wallet\n\nPlataformas:\n- Linux x86_64')"
-
-  # Windows e macOS ficam desativados até o app ganhar suporte de tray/autostart
-  # nessas plataformas (hoje o tray usa ksni, que é Linux-only). Quando chegar a
-  # hora: duplicar o job com runs-on: windows-latest / macos-latest e ajustar o
-  # empacotamento (.zip / .dmg).
+            --notes "$(printf 'Build automatizado do Skrivo Wallet\n\nPlataformas:\n- Linux x86_64\n- Windows x86_64\n- macOS aarch64 (Apple Silicon)\n- macOS x86_64 (Intel)')"
