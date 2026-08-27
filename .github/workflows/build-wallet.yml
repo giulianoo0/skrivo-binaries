@@ -35,7 +35,7 @@ jobs:
       - name: Calcular tag
         id: tag
         run: |
-          VERSION="$(grep -m1 '^version' apps/agent/Cargo.toml | cut -d'"' -f2)"
+          VERSION="$(grep -m1 '^version' apps/wallet/Cargo.toml | cut -d'"' -f2)"
           echo "tag=v${VERSION}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
   build:
@@ -97,7 +97,7 @@ jobs:
       - name: Cache de build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/agent
+          workspaces: apps/wallet
           key: ${{ matrix.target }}
 
       # O build.rs do gpui compila os shaders HLSL com fxc.exe em release. O
@@ -124,7 +124,7 @@ jobs:
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           # Piso de compatibilidade do macOS; 11.0 é o mínimo para arm64.
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path apps/agent/Cargo.toml
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path apps/wallet/Cargo.toml
 
       # Todo artefato vem acompanhado de um `.sha256` cujo nome é o do arquivo
       # + ".sha256" (updater.rs: `format!("{}.sha256", asset.name)`), no
@@ -138,7 +138,7 @@ jobs:
           set -euo pipefail
           ASSET="skrivo-wallet-${{ needs.version.outputs.tag }}-${{ matrix.asset }}.tar.gz"
           mkdir -p dist stage
-          cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" "stage/${{ matrix.bin }}"
+          cp "apps/wallet/target/${{ matrix.target }}/release/${{ matrix.bin }}" "stage/${{ matrix.bin }}"
           tar -czf "dist/${ASSET}" -C stage "${{ matrix.bin }}"
           cd dist
           sha256sum "${ASSET}" > "${ASSET}.sha256"
@@ -153,7 +153,7 @@ jobs:
           set -euo pipefail
           ASSET="skrivo-wallet-${{ needs.version.outputs.tag }}-${{ matrix.asset }}.exe"
           mkdir -p dist
-          cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${ASSET}"
+          cp "apps/wallet/target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${ASSET}"
           cd dist
           # O bash do runner do Windows (Git for Windows) traz sha256sum, mas o
           # fallback mantém o passo válido em qualquer imagem.
@@ -186,7 +186,7 @@ jobs:
           # assinado é o tipo de passo que estraga o selo sem avisar.
           APP="dmgroot/Skrivo Wallet.app"
           mkdir -p dist stage "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
-          cp "apps/agent/target/${{ matrix.target }}/release/${{ matrix.bin }}" \
+          cp "apps/wallet/target/${{ matrix.target }}/release/${{ matrix.bin }}" \
             "${APP}/Contents/MacOS/skrivo-wallet"
           chmod +x "${APP}/Contents/MacOS/skrivo-wallet"
 
